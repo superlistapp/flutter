@@ -279,6 +279,7 @@ abstract class DragGestureRecognizer extends OneSequenceGestureRecognizer {
   // The buttons sent by `PointerDownEvent`. If a `PointerMoveEvent` comes with a
   // different set of buttons, the gesture is canceled.
   int? _initialButtons;
+  int? _initialPointer;
   Matrix4? _lastTransform;
 
   /// Distance moved in the global coordinate space of the screen in drag direction.
@@ -324,6 +325,11 @@ abstract class DragGestureRecognizer extends OneSequenceGestureRecognizer {
         return false;
       }
     }
+    if (_initialPointer != null &&
+        event.kind == PointerDeviceKind.mouse &&
+        event.pointer != _initialPointer) {
+      return false;
+    }
     return super.isPointerAllowed(event as PointerDownEvent);
   }
 
@@ -347,6 +353,7 @@ abstract class DragGestureRecognizer extends OneSequenceGestureRecognizer {
     super.addAllowedPointer(event);
     if (_state == _DragState.ready) {
       _initialButtons = event.buttons;
+      _initialPointer = event.pointer;
     }
     _addPointer(event);
   }
@@ -357,6 +364,7 @@ abstract class DragGestureRecognizer extends OneSequenceGestureRecognizer {
     startTrackingPointer(event.pointer, event.transform);
     if (_state == _DragState.ready) {
       _initialButtons = kPrimaryButton;
+      _initialPointer = event.pointer;
     }
     _addPointer(event);
   }
@@ -454,6 +462,7 @@ abstract class DragGestureRecognizer extends OneSequenceGestureRecognizer {
     _hasDragThresholdBeenMet = false;
     _velocityTrackers.clear();
     _initialButtons = null;
+    _initialPointer = null;
     _state = _DragState.ready;
   }
 
