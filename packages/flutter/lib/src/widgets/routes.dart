@@ -1069,6 +1069,9 @@ class _ModalScopeState<T> extends State<_ModalScope<T>> {
                                 builder: (BuildContext context, Widget? child) {
                                   final bool ignoreEvents = _shouldIgnoreFocusRequest;
                                   focusScopeNode.canRequestFocus = !ignoreEvents;
+                                  // Bug in current main where descendantsAreFocusable is stuck on
+                                  // false when FocusNod gets rebuilt after disabling canRequestFocus on node.
+                                  focusScopeNode.descendantsAreFocusable = !ignoreEvents;
                                   return IgnorePointer(
                                     ignoring: ignoreEvents,
                                     child: child,
