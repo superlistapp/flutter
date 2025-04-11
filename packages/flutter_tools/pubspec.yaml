@@ -121,4 +121,11 @@ dartdoc:
   # Exclude this package from the hosted API docs.
   nodoc: true
 
+dependency_overrides:
+  native_assets_builder:
+    git:
+      url: https://github.com/knopp/native.git
+      path: pkgs/native_assets_builder
+      ref: 5287fac11d554bbea3928f01d33997eb0b853300
+
 # PUBSPEC CHECKSUM: b738

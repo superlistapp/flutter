@@ -6,6 +6,8 @@
 
 import 'package:logging/logging.dart' as logging;
 import 'package:native_assets_builder/native_assets_builder.dart';
+// ignore: implementation_imports
+import 'package:native_assets_builder/src/build_runner/build_runner.dart';
 import 'package:native_assets_cli/code_assets_builder.dart';
 import 'package:native_assets_cli/native_assets_cli_internal.dart';
 import 'package:package_config/package_config_types.dart';
