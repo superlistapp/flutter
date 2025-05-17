@@ -220,12 +220,14 @@ EmbedFrameworks() {
   if [[ -d "$native_assets_path" ]]; then
     RunCommand rsync -av --filter "- .DS_Store" --filter "- native_assets.yaml" --filter "- native_assets.json" "${native_assets_path}" "${xcode_frameworks_dir}"
 
-    # Iterate through all .frameworks in native assets directory.
-    for native_asset in "${native_assets_path}"*.framework; do
-      [ -e "$native_asset" ] || continue # Skip when there are no matches.
-      # Codesign the framework inside the app bundle.
-      RunCommand codesign --force --verbose --sign "${EXPANDED_CODE_SIGN_IDENTITY}" -- "${xcode_frameworks_dir}/$(basename "$native_asset")"
-    done
+    if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
+      # Iterate through all .frameworks in native assets directory.
+      for native_asset in "${native_assets_path}"*.framework; do
+        [ -e "$native_asset" ] || continue # Skip when there are no matches.
+        # Codesign the framework inside the app bundle.
+        RunCommand codesign --force --verbose --sign "${EXPANDED_CODE_SIGN_IDENTITY}" -- "${xcode_frameworks_dir}/$(basename "$native_asset")"
+      done
+    fi
   fi
 }
 
