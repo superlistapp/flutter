@@ -1059,7 +1059,7 @@ STDERR STUFF
       FileSystem: () => fileSystem,
       Logger: () => logger,
       ProcessManager: () => fakeProcessManager,
-      Pub: FakePubWithPrimedDeps.new,
+      Pub: ThrowingPub.new,
       Platform: () => macosPlatform,
     },
   );
