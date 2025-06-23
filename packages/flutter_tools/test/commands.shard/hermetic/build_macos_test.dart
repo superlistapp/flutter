@@ -1036,7 +1036,7 @@ STDERR STUFF
             '-derivedDataPath',
             '/build/macos',
             '-destination',
-            'platform=macOS',
+            'generic/platform=macOS',
             'OBJROOT=/build/macos/Build/Intermediates.noindex',
             'SYMROOT=/build/macos/Build/Products',
             '-quiet',
@@ -1053,7 +1053,7 @@ STDERR STUFF
         command,
       ).run(const <String>['build', 'macos', '--no-pub', '--no-codesign']);
       expect(fakeProcessManager, hasNoRemainingExpectations);
-      expect(logger.statusText, contains('Codesigning disabled with --no-codesign'));
+      expect(logger.statusText, contains('Warning: Building with codesigning disabled.'));
     },
     overrides: <Type, Generator>{
       FileSystem: () => fileSystem,
