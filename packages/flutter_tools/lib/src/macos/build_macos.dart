@@ -73,6 +73,7 @@ Future<void> buildMacOS({
   bool configOnly = false,
   SizeAnalyzer? sizeAnalyzer,
   bool usingCISystem = false,
+  bool codesign = true,
 }) async {
   final Directory? xcodeWorkspace = flutterProject.macos.xcodeWorkspace;
   if (xcodeWorkspace == null) {
@@ -256,6 +257,11 @@ Future<void> buildMacOS({
         if (excludedArches != null && excludedArches.trim().isNotEmpty)
           'EXCLUDED_ARCHS=$excludedArches',
         ...environmentVariablesAsXcodeBuildSettings(globals.platform),
+        if (!codesign) ...<String>[
+          'CODE_SIGNING_ALLOWED=NO',
+          'CODE_SIGNING_REQUIRED=NO',
+          'CODE_SIGNING_IDENTITY=""',
+        ],
       ],
       trace: true,
       stdoutErrorMatcher: verboseLogging ? null : _filteredOutput,
