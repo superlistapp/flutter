@@ -4128,6 +4128,47 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     Set<Element>? forgottenChildren,
     List<Object?>? slots,
   }) {
+    final newChildren = List<Element>.filled(newWidgets.length, _NullElement.instance);
+    try {
+      return _updateChildren(
+        oldChildren,
+        newWidgets,
+        newChildren,
+        forgottenChildren: forgottenChildren,
+        slots: slots,
+      );
+    } catch (_) {
+      _deactivateChildrenAfterFailedUpdate(oldChildren, newChildren);
+      rethrow;
+    }
+  }
+
+  // The caller keeps its old child list when updateChildren throws, so children
+  // inflated (or moved here through a GlobalKey) before the failure would
+  // otherwise stay active without being reachable through visitChildren.
+  // Children from the old list stay attached: a caller may retry the update
+  // with that list, and otherwise its own cleanup reaches them.
+  void _deactivateChildrenAfterFailedUpdate(List<Element> oldChildren, List<Element> newChildren) {
+    final oldChildSet = Set<Element>.identity()..addAll(oldChildren);
+    for (final newChild in newChildren) {
+      if (newChild is _NullElement || oldChildSet.contains(newChild)) {
+        continue;
+      }
+      try {
+        deactivateChild(newChild);
+      } catch (_) {
+        _deactivateRemainingSubtreeSilently(newChild);
+      }
+    }
+  }
+
+  List<Element> _updateChildren(
+    List<Element> oldChildren,
+    List<Widget> newWidgets,
+    List<Element> newChildren, {
+    Set<Element>? forgottenChildren,
+    List<Object?>? slots,
+  }) {
     assert(slots == null || newWidgets.length == slots.length);
 
     Element? replaceWithNullIfForgotten(Element child) {
@@ -4175,8 +4216,6 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     var oldChildrenTop = 0;
     int newChildrenBottom = newWidgets.length - 1;
     int oldChildrenBottom = oldChildren.length - 1;
-
-    final newChildren = List<Element>.filled(newWidgets.length, _NullElement.instance);
 
     Element? previousChild;
 

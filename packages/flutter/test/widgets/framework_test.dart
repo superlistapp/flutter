@@ -2331,6 +2331,239 @@ The findRenderObject() method was called for the following element:
     expect(tester.element(find.byType(StatefulWidgetSpy)), same(element));
     expect(disposals, 0);
   });
+
+  group('updateChildren throwing after inflating new children', () {
+    Widget stackOf(List<Widget> middle) {
+      return Directionality(
+        textDirection: TextDirection.ltr,
+        child: Builder(
+          builder: (_) => Stack(children: <Widget>[const SizedBox(), ...middle, const SizedBox()]),
+        ),
+      );
+    }
+
+    testWidgets('unmounts the new children once and reports the original error', (
+      WidgetTester tester,
+    ) async {
+      final notifier = _ListenerCountingNotifier();
+      addTearDown(notifier.dispose);
+      var oldDisposals = 0;
+      var newDeactivations = 0;
+      var newDisposals = 0;
+      var builds = 0;
+      await tester.pumpWidget(
+        stackOf(<Widget>[StatefulWidgetSpy(onDispose: (_) => oldDisposals++)]),
+      );
+      final Element oldElement = tester.element(find.byType(StatefulWidgetSpy));
+
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      await tester.pumpWidget(
+        stackOf(<Widget>[
+          const SizedBox(width: 1),
+          StatefulWidgetSpy(
+            onDeactivate: (_) => newDeactivations++,
+            onDispose: (_) => newDisposals++,
+            child: ListenableBuilder(
+              listenable: notifier,
+              builder: (BuildContext context, Widget? child) {
+                builds++;
+                return const SizedBox();
+              },
+            ),
+          ),
+          const _ThrowOnMountWidget(),
+        ]),
+      );
+      FlutterError.onError = onError;
+
+      expect(errors, hasLength(1));
+      expect(errors.single.exception, isStateError);
+      expect(errors.single.stack.toString(), contains('_ThrowOnMountWidget.createRenderObject'));
+      expect(find.byType(ErrorWidget), findsOneWidget);
+      expect(oldElement.debugIsDefunct, true);
+      expect(oldDisposals, 1);
+      expect(newDeactivations, 1);
+      expect(newDisposals, 1);
+      expect(notifier.listenerCount, 0);
+
+      builds = 0;
+      notifier.notify();
+      await tester.pump();
+      expect(builds, 0);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('keeps a child moved out by a GlobalKey', (WidgetTester tester) async {
+      final GlobalKey key = GlobalKey();
+      var keyedDisposals = 0;
+      var newDisposals = 0;
+      final Widget keyed = KeyedSubtree(
+        key: key,
+        child: StatefulWidgetSpy(onDispose: (_) => keyedDisposals++),
+      );
+      Widget buildTree({required bool moved}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Stack(
+            children: <Widget>[
+              if (moved) keyed,
+              Builder(
+                builder: (_) => Stack(
+                  children: <Widget>[
+                    if (!moved) keyed,
+                    if (moved) StatefulWidgetSpy(onDispose: (_) => newDisposals++),
+                    if (moved) const _ThrowOnMountWidget(),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(moved: false));
+      final keyedElement = key.currentContext! as Element;
+
+      await tester.pumpWidget(buildTree(moved: true));
+
+      expect(tester.takeException(), isStateError);
+      expect(key.currentContext, same(keyedElement));
+      expect(keyedElement.debugIsActive, true);
+      expect(keyedDisposals, 0);
+      expect(newDisposals, 1);
+    });
+
+    testWidgets('unmounts a child moved in by a GlobalKey once', (WidgetTester tester) async {
+      final GlobalKey key = GlobalKey();
+      var keyedDisposals = 0;
+      final Widget keyed = KeyedSubtree(
+        key: key,
+        child: StatefulWidgetSpy(onDispose: (_) => keyedDisposals++),
+      );
+      Widget buildTree({required bool moved}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Stack(
+            children: <Widget>[
+              if (!moved) keyed,
+              Builder(
+                builder: (_) => Stack(
+                  children: <Widget>[if (moved) keyed, if (moved) const _ThrowOnMountWidget()],
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(moved: false));
+      final keyedElement = key.currentContext! as Element;
+
+      await tester.pumpWidget(buildTree(moved: true));
+
+      expect(tester.takeException(), isStateError);
+      expect(keyedElement.debugIsDefunct, true);
+      expect(key.currentContext, isNull);
+      expect(keyedDisposals, 1);
+
+      await tester.pumpWidget(buildTree(moved: false));
+      expect(key.currentContext, isNotNull);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('keeps the old children usable for a caller that retries the update', (
+      WidgetTester tester,
+    ) async {
+      var disposals = 0;
+      Widget buildTree(List<Widget> children) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: _SurvivingStack(children: children),
+        );
+      }
+
+      final Widget kept = StatefulWidgetSpy(
+        key: const ValueKey<String>('kept'),
+        onDispose: (_) => disposals++,
+      );
+      await tester.pumpWidget(buildTree(<Widget>[kept]));
+      final Element keptElement = tester.element(find.byType(StatefulWidgetSpy));
+
+      await tester.pumpWidget(buildTree(<Widget>[kept, const _ThrowOnMountWidget()]));
+      await tester.pumpWidget(buildTree(<Widget>[kept, const SizedBox()]));
+
+      expect(tester.takeException(), isNull);
+      expect(tester.element(find.byType(StatefulWidgetSpy)), same(keptElement));
+      expect(keptElement.debugIsActive, true);
+      expect(disposals, 0);
+    });
+
+    testWidgets('stops a new child from building if deactivating it throws', (
+      WidgetTester tester,
+    ) async {
+      final notifier = _ListenerCountingNotifier();
+      addTearDown(notifier.dispose);
+      var builds = 0;
+      late Element built;
+      await tester.pumpWidget(stackOf(const <Widget>[]));
+
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      await tester.pumpWidget(
+        stackOf(<Widget>[
+          StatefulWidgetSpy(
+            onDeactivate: (_) => throw ArgumentError('deactivate'),
+            child: ListenableBuilder(
+              listenable: notifier,
+              builder: (BuildContext context, Widget? child) {
+                builds++;
+                built = context as Element;
+                return const SizedBox();
+              },
+            ),
+          ),
+          const _ThrowOnMountWidget(),
+        ]),
+      );
+      FlutterError.onError = onError;
+
+      expect(errors, hasLength(1));
+      expect(errors.single.exception, isStateError);
+      expect(built.debugIsActive, false);
+
+      builds = 0;
+      notifier.notify();
+      await tester.pump();
+      expect(builds, 0);
+      expect(tester.takeException(), isNull);
+    });
+  });
+}
+
+// A Stack whose element survives a failing update and retries it with its old
+// children on the next update, like an element that calls updateChildren from
+// a performRebuild without catching.
+class _SurvivingStack extends Stack {
+  const _SurvivingStack({super.children});
+
+  @override
+  MultiChildRenderObjectElement createElement() => _SurvivingStackElement(this);
+}
+
+class _SurvivingStackElement extends MultiChildRenderObjectElement {
+  _SurvivingStackElement(_SurvivingStack super.widget);
+
+  @override
+  void update(MultiChildRenderObjectWidget newWidget) {
+    try {
+      super.update(newWidget);
+    } on StateError {
+      // Leave the old children in place.
+    }
+  }
 }
 
 class _ThrowOnMountWidget extends LeafRenderObjectWidget {
