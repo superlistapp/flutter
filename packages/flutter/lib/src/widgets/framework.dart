@@ -4644,6 +4644,47 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     }());
   }
 
+  static bool _isActiveSubtree(Element element) {
+    if (element._lifecycleState != _ElementLifecycle.active) {
+      return false;
+    }
+    var isActive = true;
+    element.visitChildren((Element child) {
+      isActive = isActive && child._parent == element && _isActiveSubtree(child);
+    });
+    return isActive;
+  }
+
+  // Like _deactivateFailedChildSilently, but only deactivates the elements
+  // that are still active, and skips descendants no longer attached to their
+  // parent: those were already handed to the inactive elements list or to a
+  // new parent.
+  void _deactivateRemainingSubtreeSilently(Element child) {
+    try {
+      child._parent = null;
+      child.detachRenderObject();
+    } catch (_) {}
+    void fail(Element element) {
+      if (element._lifecycleState == _ElementLifecycle.active) {
+        try {
+          element.deactivate();
+        } catch (_) {
+          element._ensureDeactivated();
+        }
+      }
+      element._lifecycleState = _ElementLifecycle.failed;
+      try {
+        element.visitChildren((Element descendant) {
+          if (descendant._parent == element) {
+            fail(descendant);
+          }
+        });
+      } catch (_) {}
+    }
+
+    fail(child);
+  }
+
   void _deactivateFailedChildSilently(Element child) {
     try {
       child._parent = null;
@@ -5851,10 +5892,26 @@ abstract class ComponentElement extends Element {
           ],
         ),
       );
-      // _Make sure the old child subtree are deactivated and disposed.
-      try {
-        _child?.deactivate();
-      } catch (_) {}
+      // Make sure the old child subtree no longer builds: an intact subtree is
+      // deactivated and unmounted (disposing its states). If updateChild
+      // already deactivated it before failing, it is no longer our child. A
+      // subtree that was only partly updated (e.g. some of its children were
+      // already deactivated) can't go through the inactive elements list
+      // without being unmounted twice, so it is only marked failed and is not
+      // disposed.
+      final Element? oldChild = _child;
+      _child = null;
+      if (oldChild != null && oldChild._parent == this) {
+        if (Element._isActiveSubtree(oldChild)) {
+          try {
+            deactivateChild(oldChild);
+          } catch (_) {
+            _deactivateRemainingSubtreeSilently(oldChild);
+          }
+        } else {
+          _deactivateRemainingSubtreeSilently(oldChild);
+        }
+      }
       _child = updateChild(null, built, slot);
     }
   }
