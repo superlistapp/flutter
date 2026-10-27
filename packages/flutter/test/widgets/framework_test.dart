@@ -2541,6 +2541,123 @@ The findRenderObject() method was called for the following element:
       expect(tester.takeException(), isNull);
     });
   });
+
+  group('a dispose that throws while finalizing the tree', () {
+    testWidgets('does not stop the other inactive elements from being unmounted', (
+      WidgetTester tester,
+    ) async {
+      final GlobalKey key = GlobalKey();
+      var throwOnDispose = true;
+      final disposals = <String, int>{};
+      void disposed(String name) => disposals[name] = (disposals[name] ?? 0) + 1;
+      Widget buildTree({required bool removed}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(
+            children: <Widget>[
+              if (!removed)
+                StatefulWidgetSpy(
+                  onDispose: (_) => disposed('parent'),
+                  child: Stack(
+                    children: <Widget>[
+                      StatefulWidgetSpy(
+                        onDispose: (_) {
+                          disposed('throwing');
+                          if (throwOnDispose) {
+                            throw StateError('dispose failed');
+                          }
+                        },
+                      ),
+                      StatefulWidgetSpy(onDispose: (_) => disposed('sibling')),
+                    ],
+                  ),
+                ),
+              if (!removed)
+                KeyedSubtree(
+                  key: key,
+                  child: StatefulWidgetSpy(onDispose: (_) => disposed('keyed')),
+                ),
+            ],
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(removed: false));
+      final List<Element> spies = tester.elementList(find.byType(StatefulWidgetSpy)).toList();
+
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      await tester.pumpWidget(buildTree(removed: true));
+      FlutterError.onError = onError;
+      throwOnDispose = false;
+
+      expect(errors, hasLength(1));
+      expect((errors.single.exception as StateError).message, 'dispose failed');
+      expect(errors.single.stack.toString(), contains('_StatefulWidgetSpyState.dispose'));
+      expect(disposals, <String, int>{'throwing': 1, 'sibling': 1, 'parent': 1, 'keyed': 1});
+      expect(spies.every((Element spy) => spy.debugIsDefunct), true);
+      expect(key.currentContext, isNull);
+
+      await tester.pumpWidget(buildTree(removed: false));
+      expect(tester.takeException(), isNull);
+      expect(key.currentContext, isNotNull);
+    });
+
+    testWidgets('reports every failed dispose once, after the tree is unlocked', (
+      WidgetTester tester,
+    ) async {
+      var disposals = 0;
+      late StateSetter setProbeState;
+      Widget throwing(String message) => StatefulWidgetSpy(
+        onDispose: (_) {
+          disposals++;
+          throw StateError(message);
+        },
+      );
+      Widget buildTree({required bool removed}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(
+            children: <Widget>[
+              StatefulBuilder(
+                builder: (BuildContext context, StateSetter setState) {
+                  setProbeState = setState;
+                  return const SizedBox();
+                },
+              ),
+              if (!removed) throwing('first'),
+              if (!removed) throwing('second'),
+            ],
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(removed: false));
+
+      final disposeErrors = <String>[];
+      final lockedErrors = <Object>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = (FlutterErrorDetails details) {
+        if (details.exception case final StateError error) {
+          disposeErrors.add(error.message);
+          try {
+            setProbeState(() {});
+          } on FlutterError catch (error) {
+            if (error.toString().contains('when widget tree was locked')) {
+              lockedErrors.add(error);
+            }
+          }
+        }
+      };
+      await tester.pumpWidget(buildTree(removed: true));
+      FlutterError.onError = onError;
+
+      expect(disposals, 2);
+      expect(disposeErrors, unorderedEquals(<String>['first', 'second']));
+      expect(lockedErrors, isEmpty);
+    });
+  });
 }
 
 // A Stack whose element survives a failing update and retries it with its old

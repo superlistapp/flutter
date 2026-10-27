@@ -2100,7 +2100,11 @@ class _InactiveElements {
   bool _locked = false;
   final Set<Element> _elements = HashSet<Element>();
 
-  static void _unmount(Element element) {
+  // Errors thrown while unmounting, after the first one that _unmountAll
+  // rethrows. They are reported once the build owner is unlocked.
+  final List<(Object, StackTrace)> _laterUnmountErrors = <(Object, StackTrace)>[];
+
+  static void _unmount(Element element, void Function(Object, StackTrace) onError) {
     assert(element._lifecycleState == _ElementLifecycle.inactive);
     assert(() {
       if (debugPrintGlobalKeyedWidgetLifecycle) {
@@ -2112,9 +2116,16 @@ class _InactiveElements {
     }());
     element.visitChildren((Element child) {
       assert(child._parent == element);
-      _unmount(child);
+      _unmount(child, onError);
     });
-    element.unmount();
+    try {
+      element.unmount();
+    } catch (error, stack) {
+      // Keep unmounting the rest of the inactive elements. The element is not
+      // unmounted again: its dispose may already have run.
+      onError(error, stack);
+      return;
+    }
     assert(element._lifecycleState == _ElementLifecycle.defunct);
   }
 
@@ -2122,11 +2133,25 @@ class _InactiveElements {
     _locked = true;
     final List<Element> elements = _elements.toList()..sort(Element._sort);
     _elements.clear();
+    (Object, StackTrace)? firstError;
+    void onError(Object error, StackTrace stack) {
+      if (firstError == null) {
+        firstError = (error, stack);
+      } else {
+        _laterUnmountErrors.add((error, stack));
+      }
+    }
+
     try {
-      elements.reversed.forEach(_unmount);
+      for (final Element element in elements.reversed) {
+        _unmount(element, onError);
+      }
     } finally {
       assert(_elements.isEmpty);
       _locked = false;
+    }
+    if (firstError case (final Object error, final StackTrace stack)) {
+      Error.throwWithStackTrace(error, stack);
     }
   }
 
@@ -3437,6 +3462,10 @@ class BuildOwner {
       // Since the tree is in a broken state, adding the ErrorWidget would
       // cause more exceptions.
       _reportException(ErrorSummary('while finalizing the widget tree'), e, stack);
+      for (final (Object error, StackTrace errorStack) in _inactiveElements._laterUnmountErrors) {
+        _reportException(ErrorSummary('while finalizing the widget tree'), error, errorStack);
+      }
+      _inactiveElements._laterUnmountErrors.clear();
     } finally {
       if (!kReleaseMode) {
         FlutterTimeline.finishSync();
