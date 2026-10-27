@@ -2188,7 +2188,14 @@ class _InactiveElements {
 
     switch (element._lifecycleState) {
       case _ElementLifecycle.active:
-        _deactivateRecursively(element);
+        try {
+          _deactivateRecursively(element);
+        } catch (_) {
+          // The element was already detached, so nothing else will unmount
+          // the part of its subtree that deactivated fine.
+          element._salvageAfterFailedDeactivation(element);
+          rethrow;
+        }
         // This element is only added to _elements if the whole subtree is
         // successfully deactivated.
         _elements.add(element);

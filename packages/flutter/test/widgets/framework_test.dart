@@ -2922,6 +2922,65 @@ The findRenderObject() method was called for the following element:
       expect(builds, 1);
     });
   });
+
+  testWidgets('removing a subtree whose deactivate throws still unmounts its healthy part', (
+    WidgetTester tester,
+  ) async {
+    final notifier = _ListenerCountingNotifier();
+    addTearDown(notifier.dispose);
+    var throwOnDeactivate = false;
+    final builds = <String, int>{};
+    final disposals = <String, int>{};
+    void count(Map<String, int> counts, String name) => counts[name] = (counts[name] ?? 0) + 1;
+    Widget spy(String name) => StatefulWidgetSpy(
+      onDeactivate: (_) {
+        if (throwOnDeactivate && name == 'throwing') {
+          throw StateError('deactivate failed');
+        }
+      },
+      onDispose: (_) => count(disposals, name),
+      child: ListenableBuilder(
+        listenable: notifier,
+        builder: (BuildContext context, Widget? child) {
+          count(builds, name);
+          return const SizedBox();
+        },
+      ),
+    );
+    Widget buildTree({required bool removed}) {
+      return Directionality(
+        textDirection: TextDirection.ltr,
+        child: Column(
+          children: <Widget>[
+            if (!removed) Stack(children: <Widget>[spy('before'), spy('throwing'), spy('after')]),
+            spy('stays'),
+          ],
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildTree(removed: false));
+    throwOnDeactivate = true;
+    final errors = <FlutterErrorDetails>[];
+    final FlutterExceptionHandler? onError = FlutterError.onError;
+    FlutterError.onError = errors.add;
+    await tester.pumpWidget(buildTree(removed: true));
+    FlutterError.onError = onError;
+    throwOnDeactivate = false;
+
+    expect(
+      errors.map((FlutterErrorDetails details) => details.exception),
+      contains(isA<StateError>()),
+    );
+    expect(find.byType(ErrorWidget), findsOneWidget);
+    expect(disposals, <String, int>{'before': 1, 'after': 1, 'stays': 1});
+
+    builds.clear();
+    notifier.notify();
+    await tester.pump();
+    expect(builds, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _ThrowOnRemoveChildWidget extends SingleChildRenderObjectWidget {
