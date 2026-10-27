@@ -4726,8 +4726,8 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
   // Called when deactivating the detached child failed part-way. Hands every
   // subtree that can still be unmounted to the inactive elements list, so it
   // is unmounted (and its states disposed) at the end of the frame. Elements
-  // whose deactivate threw, and their ancestors, are marked failed instead and
-  // are not disposed.
+  // whose deactivate threw, and their ancestors, are marked failed instead:
+  // they are not disposed, but their GlobalKeys are released.
   void _salvageAfterFailedDeactivation(Element child) {
     // If detaching the render object failed, the subtree's render objects are
     // still in the render tree and must not be disposed.
@@ -4762,6 +4762,11 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
         return true;
       }
       element._lifecycleState = _ElementLifecycle.failed;
+      // A failed element is never unmounted, so release its GlobalKey here:
+      // otherwise a later widget with that key would try to retake it.
+      if (element.widget.key case final GlobalKey key) {
+        owner!._unregisterGlobalKey(key, element);
+      }
       for (final (Element descendant, bool canUnmount) in attached) {
         if (canUnmount) {
           descendant._parent = null;

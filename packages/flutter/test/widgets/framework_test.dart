@@ -2878,6 +2878,49 @@ The findRenderObject() method was called for the following element:
       expect(disposals, 1);
       expect(spy.debugIsDefunct, true);
     });
+
+    testWidgets('releases the GlobalKeys of the elements left failed', (WidgetTester tester) async {
+      final GlobalKey key = GlobalKey();
+      var throwOnDeactivate = false;
+      var builds = 0;
+      Widget buildTree({required bool failing}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Builder(
+            builder: (_) => _ThrowOnUpdateWidget(
+              throwOnUpdate: failing,
+              child: KeyedSubtree(
+                key: key,
+                child: StatefulWidgetSpy(
+                  onBuild: (_) => builds++,
+                  onDeactivate: (_) {
+                    if (throwOnDeactivate) {
+                      throw StateError('deactivate failed');
+                    }
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(failing: false));
+      final failed = key.currentContext! as Element;
+      throwOnDeactivate = true;
+      await tester.pumpWidget(buildTree(failing: true));
+      throwOnDeactivate = false;
+      expect(tester.takeException(), isStateError);
+      expect(key.currentContext, isNull);
+
+      builds = 0;
+      await tester.pumpWidget(buildTree(failing: false));
+
+      expect(tester.takeException(), isNull);
+      expect(key.currentContext, isNot(same(failed)));
+      expect((key.currentContext! as Element).debugIsActive, true);
+      expect(builds, 1);
+    });
   });
 }
 
