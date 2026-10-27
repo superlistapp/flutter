@@ -2115,8 +2115,11 @@ class _InactiveElements {
       return true;
     }());
     element.visitChildren((Element child) {
-      assert(child._parent == element);
-      _unmount(child, onError);
+      // A child no longer attached to element was already handed to this list
+      // or to a new parent (see ComponentElement.performRebuild).
+      if (child._parent == element) {
+        _unmount(child, onError);
+      }
     });
     try {
       element.unmount();
@@ -2163,11 +2166,19 @@ class _InactiveElements {
       Element._deactivateFailedSubtreeRecursively(element);
       rethrow;
     }
-    element.visitChildren(_deactivateRecursively);
+    element.visitChildren(_deactivateAttachedChildRecursively);
     assert(() {
       element.debugDeactivated();
       return true;
     }());
+  }
+
+  // A child that a failed update already detached and handed to this list has
+  // no parent, and is skipped.
+  static void _deactivateAttachedChildRecursively(Element child) {
+    if (child._parent != null) {
+      _deactivateRecursively(child);
+    }
   }
 
   void add(Element element) {
@@ -4186,7 +4197,7 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
       try {
         deactivateChild(newChild);
       } catch (_) {
-        _deactivateRemainingSubtreeSilently(newChild);
+        _salvageAfterFailedDeactivation(newChild);
       }
     }
   }
@@ -4712,45 +4723,60 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     }());
   }
 
-  static bool _isActiveSubtree(Element element) {
-    if (element._lifecycleState != _ElementLifecycle.active) {
-      return false;
-    }
-    var isActive = true;
-    element.visitChildren((Element child) {
-      isActive = isActive && child._parent == element && _isActiveSubtree(child);
-    });
-    return isActive;
-  }
-
-  // Like _deactivateFailedChildSilently, but only deactivates the elements
-  // that are still active, and skips descendants no longer attached to their
-  // parent: those were already handed to the inactive elements list or to a
-  // new parent.
-  void _deactivateRemainingSubtreeSilently(Element child) {
+  // Called when deactivating the detached child failed part-way. Hands every
+  // subtree that can still be unmounted to the inactive elements list, so it
+  // is unmounted (and its states disposed) at the end of the frame. Elements
+  // whose deactivate threw, and their ancestors, are marked failed instead and
+  // are not disposed.
+  void _salvageAfterFailedDeactivation(Element child) {
+    // If detaching the render object failed, the subtree's render objects are
+    // still in the render tree and must not be disposed.
+    bool canUnmountAny;
     try {
-      child._parent = null;
-      child.detachRenderObject();
-    } catch (_) {}
-    void fail(Element element) {
+      canUnmountAny = child.renderObject?.parent == null;
+    } catch (_) {
+      canUnmountAny = false;
+    }
+    bool salvage(Element element) {
       if (element._lifecycleState == _ElementLifecycle.active) {
         try {
           element.deactivate();
         } catch (_) {
           element._ensureDeactivated();
+          element._lifecycleState = _ElementLifecycle.failed;
         }
       }
-      element._lifecycleState = _ElementLifecycle.failed;
+      final attached = <(Element, bool)>[];
       try {
         element.visitChildren((Element descendant) {
           if (descendant._parent == element) {
-            fail(descendant);
+            attached.add((descendant, salvage(descendant)));
           }
         });
-      } catch (_) {}
+      } catch (_) {
+        element._lifecycleState = _ElementLifecycle.failed;
+      }
+      if (canUnmountAny &&
+          element._lifecycleState == _ElementLifecycle.inactive &&
+          attached.every(((Element, bool) entry) => entry.$2)) {
+        return true;
+      }
+      element._lifecycleState = _ElementLifecycle.failed;
+      for (final (Element descendant, bool canUnmount) in attached) {
+        if (canUnmount) {
+          descendant._parent = null;
+          try {
+            descendant.detachRenderObject();
+          } catch (_) {}
+          owner!._inactiveElements.add(descendant);
+        }
+      }
+      return false;
     }
 
-    fail(child);
+    if (salvage(child)) {
+      owner!._inactiveElements.add(child);
+    }
   }
 
   void _deactivateFailedChildSilently(Element child) {
@@ -4781,7 +4807,11 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     }
     element._lifecycleState = _ElementLifecycle.failed;
     try {
-      element.visitChildren(_deactivateFailedSubtreeRecursively);
+      element.visitChildren((Element child) {
+        if (child._parent == element) {
+          _deactivateFailedSubtreeRecursively(child);
+        }
+      });
     } catch (_) {}
   }
 
@@ -5960,24 +5990,17 @@ abstract class ComponentElement extends Element {
           ],
         ),
       );
-      // Make sure the old child subtree no longer builds: an intact subtree is
-      // deactivated and unmounted (disposing its states). If updateChild
-      // already deactivated it before failing, it is no longer our child. A
-      // subtree that was only partly updated (e.g. some of its children were
-      // already deactivated) can't go through the inactive elements list
-      // without being unmounted twice, so it is only marked failed and is not
-      // disposed.
+      // Make sure the old child subtree is deactivated and unmounted (disposing
+      // its states). If updateChild already deactivated it before failing, it
+      // is no longer our child. Children it detached from a partly updated
+      // subtree are skipped by the inactive elements list.
       final Element? oldChild = _child;
       _child = null;
       if (oldChild != null && oldChild._parent == this) {
-        if (Element._isActiveSubtree(oldChild)) {
-          try {
-            deactivateChild(oldChild);
-          } catch (_) {
-            _deactivateRemainingSubtreeSilently(oldChild);
-          }
-        } else {
-          _deactivateRemainingSubtreeSilently(oldChild);
+        try {
+          deactivateChild(oldChild);
+        } catch (_) {
+          _salvageAfterFailedDeactivation(oldChild);
         }
       }
       _child = updateChild(null, built, slot);
