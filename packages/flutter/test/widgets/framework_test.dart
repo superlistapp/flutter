@@ -2923,6 +2923,70 @@ The findRenderObject() method was called for the following element:
     });
   });
 
+  for (final newChild in <bool>[false, true]) {
+    testWidgets('salvages a debug deactivation failure once (new child: $newChild)', (
+      WidgetTester tester,
+    ) async {
+      final GlobalKey rootKey = GlobalKey();
+      var rootDisposals = 0;
+      var childDeactivations = 0;
+      var childDisposals = 0;
+      Widget tree(bool fail) {
+        final Widget child = _ThrowOnDebugDeactivated(
+          child: StatefulWidgetSpy(
+            onDeactivate: (_) => childDeactivations++,
+            onDispose: (_) => childDisposals++,
+          ),
+        );
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: StatefulWidgetSpy(
+            key: rootKey,
+            onDispose: (_) => rootDisposals++,
+            child: newChild
+                ? Stack(
+                    children: <Widget>[
+                      const SizedBox(key: ValueKey<String>('first')),
+                      if (fail) child,
+                      if (fail) const _ThrowOnMountWidget(),
+                      const SizedBox(key: ValueKey<String>('last')),
+                    ],
+                  )
+                : _ThrowOnUpdateWidget(throwOnUpdate: fail, child: child),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(tree(false));
+      final root = rootKey.currentContext! as Element;
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      try {
+        await tester.pumpWidget(tree(true));
+      } finally {
+        FlutterError.onError = onError;
+      }
+
+      expect(errors, hasLength(1));
+      expect(errors.single.exception, isA<StateError>());
+      expect(errors.single.exception.toString(), contains('kaboom'));
+      expect(rootKey.currentContext, same(root));
+      expect(root.debugIsActive, true);
+      expect(rootDisposals, 0);
+      expect(
+        find.descendant(of: find.byKey(rootKey), matching: find.byType(ErrorWidget)),
+        findsOneWidget,
+      );
+      expect(childDeactivations, 1);
+      expect(childDisposals, 1);
+      await tester.pumpWidget(const SizedBox());
+      expect(rootDisposals, 1);
+      expect(childDisposals, 1);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('removing a subtree whose deactivate throws still unmounts its healthy part', (
     WidgetTester tester,
   ) async {
@@ -2981,6 +3045,28 @@ The findRenderObject() method was called for the following element:
     expect(builds, isEmpty);
     expect(tester.takeException(), isNull);
   });
+}
+
+class _ThrowOnDebugDeactivated extends StatelessWidget {
+  const _ThrowOnDebugDeactivated({required this.child});
+
+  final Widget child;
+
+  @override
+  StatelessElement createElement() => _ThrowOnDebugDeactivatedElement(this);
+
+  @override
+  Widget build(BuildContext context) => child;
+}
+
+class _ThrowOnDebugDeactivatedElement extends StatelessElement {
+  _ThrowOnDebugDeactivatedElement(_ThrowOnDebugDeactivated super.widget);
+
+  @override
+  void debugDeactivated() {
+    super.debugDeactivated();
+    throw StateError('debug deactivation failed');
+  }
 }
 
 class _ThrowOnRemoveChildWidget extends SingleChildRenderObjectWidget {

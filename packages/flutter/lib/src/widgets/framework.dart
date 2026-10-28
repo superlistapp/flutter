@@ -4204,7 +4204,9 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
       try {
         deactivateChild(newChild);
       } catch (_) {
-        _salvageAfterFailedDeactivation(newChild);
+        if (newChild._lifecycleState == _ElementLifecycle.active) {
+          _salvageAfterFailedDeactivation(newChild);
+        }
       }
     }
   }
@@ -6012,7 +6014,9 @@ abstract class ComponentElement extends Element {
         try {
           deactivateChild(oldChild);
         } catch (_) {
-          _salvageAfterFailedDeactivation(oldChild);
+          if (oldChild._lifecycleState == _ElementLifecycle.active) {
+            _salvageAfterFailedDeactivation(oldChild);
+          }
         }
       }
       _child = updateChild(null, built, slot);
