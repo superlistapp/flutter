@@ -2173,8 +2173,8 @@ class _InactiveElements {
     }());
   }
 
-  // A child that a failed update already detached and handed to this list has
-  // no parent, and is skipped.
+  // Failed updates can leave stale child references. Recurse only through
+  // children that are still attached.
   static void _deactivateAttachedChildRecursively(Element child) {
     if (child._parent != null) {
       _deactivateRecursively(child);
@@ -4736,7 +4736,10 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
   // subtree that can still be unmounted to the inactive elements list, so it
   // is unmounted (and its states disposed) at the end of the frame. Elements
   // whose deactivate threw, and their ancestors, are marked failed instead:
-  // they are not disposed, but their GlobalKeys are released.
+  // they are not disposed, but their GlobalKeys are released. Descendants
+  // already marked failed by the first deactivation error stay failed. Later
+  // deactivation errors are suppressed here, and their children are still
+  // visited for possible unmounting.
   void _salvageAfterFailedDeactivation(Element child) {
     // If detaching the render object failed, the subtree's render objects are
     // still in the render tree and must not be disposed.
