@@ -2100,7 +2100,11 @@ class _InactiveElements {
   bool _locked = false;
   final Set<Element> _elements = HashSet<Element>();
 
-  static void _unmount(Element element) {
+  // Errors thrown while unmounting, after the first one that _unmountAll
+  // rethrows. They are reported once the build owner is unlocked.
+  final List<(Object, StackTrace)> _laterUnmountErrors = <(Object, StackTrace)>[];
+
+  static void _unmount(Element element, void Function(Object, StackTrace) onError) {
     assert(element._lifecycleState == _ElementLifecycle.inactive);
     assert(() {
       if (debugPrintGlobalKeyedWidgetLifecycle) {
@@ -2111,10 +2115,20 @@ class _InactiveElements {
       return true;
     }());
     element.visitChildren((Element child) {
-      assert(child._parent == element);
-      _unmount(child);
+      // A child no longer attached to element was already handed to this list
+      // or to a new parent (see ComponentElement.performRebuild).
+      if (child._parent == element) {
+        _unmount(child, onError);
+      }
     });
-    element.unmount();
+    try {
+      element.unmount();
+    } catch (error, stack) {
+      // Keep unmounting the rest of the inactive elements. The element is not
+      // unmounted again: its dispose may already have run.
+      onError(error, stack);
+      return;
+    }
     assert(element._lifecycleState == _ElementLifecycle.defunct);
   }
 
@@ -2122,11 +2136,25 @@ class _InactiveElements {
     _locked = true;
     final List<Element> elements = _elements.toList()..sort(Element._sort);
     _elements.clear();
+    (Object, StackTrace)? firstError;
+    void onError(Object error, StackTrace stack) {
+      if (firstError == null) {
+        firstError = (error, stack);
+      } else {
+        _laterUnmountErrors.add((error, stack));
+      }
+    }
+
     try {
-      elements.reversed.forEach(_unmount);
+      for (final Element element in elements.reversed) {
+        _unmount(element, onError);
+      }
     } finally {
       assert(_elements.isEmpty);
       _locked = false;
+    }
+    if (firstError case (final Object error, final StackTrace stack)) {
+      Error.throwWithStackTrace(error, stack);
     }
   }
 
@@ -2138,11 +2166,19 @@ class _InactiveElements {
       Element._deactivateFailedSubtreeRecursively(element);
       rethrow;
     }
-    element.visitChildren(_deactivateRecursively);
+    element.visitChildren(_deactivateAttachedChildRecursively);
     assert(() {
       element.debugDeactivated();
       return true;
     }());
+  }
+
+  // Failed updates can leave stale child references. Recurse only through
+  // children that are still attached.
+  static void _deactivateAttachedChildRecursively(Element child) {
+    if (child._parent != null) {
+      _deactivateRecursively(child);
+    }
   }
 
   void add(Element element) {
@@ -2152,7 +2188,14 @@ class _InactiveElements {
 
     switch (element._lifecycleState) {
       case _ElementLifecycle.active:
-        _deactivateRecursively(element);
+        try {
+          _deactivateRecursively(element);
+        } catch (_) {
+          // The element was already detached, so nothing else will unmount
+          // the part of its subtree that deactivated fine.
+          element._salvageAfterFailedDeactivation(element);
+          rethrow;
+        }
         // This element is only added to _elements if the whole subtree is
         // successfully deactivated.
         _elements.add(element);
@@ -3437,6 +3480,10 @@ class BuildOwner {
       // Since the tree is in a broken state, adding the ErrorWidget would
       // cause more exceptions.
       _reportException(ErrorSummary('while finalizing the widget tree'), e, stack);
+      for (final (Object error, StackTrace errorStack) in _inactiveElements._laterUnmountErrors) {
+        _reportException(ErrorSummary('while finalizing the widget tree'), error, errorStack);
+      }
+      _inactiveElements._laterUnmountErrors.clear();
     } finally {
       if (!kReleaseMode) {
         FlutterTimeline.finishSync();
@@ -4128,6 +4175,49 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     Set<Element>? forgottenChildren,
     List<Object?>? slots,
   }) {
+    final newChildren = List<Element>.filled(newWidgets.length, _NullElement.instance);
+    try {
+      return _updateChildren(
+        oldChildren,
+        newWidgets,
+        newChildren,
+        forgottenChildren: forgottenChildren,
+        slots: slots,
+      );
+    } catch (_) {
+      _deactivateChildrenAfterFailedUpdate(oldChildren, newChildren);
+      rethrow;
+    }
+  }
+
+  // The caller keeps its old child list when updateChildren throws, so children
+  // inflated (or moved here through a GlobalKey) before the failure would
+  // otherwise stay active without being reachable through visitChildren.
+  // Children from the old list stay attached: a caller may retry the update
+  // with that list, and otherwise its own cleanup reaches them.
+  void _deactivateChildrenAfterFailedUpdate(List<Element> oldChildren, List<Element> newChildren) {
+    final oldChildSet = Set<Element>.identity()..addAll(oldChildren);
+    for (final newChild in newChildren) {
+      if (newChild is _NullElement || oldChildSet.contains(newChild)) {
+        continue;
+      }
+      try {
+        deactivateChild(newChild);
+      } catch (_) {
+        if (newChild._lifecycleState == _ElementLifecycle.active) {
+          _salvageAfterFailedDeactivation(newChild);
+        }
+      }
+    }
+  }
+
+  List<Element> _updateChildren(
+    List<Element> oldChildren,
+    List<Widget> newWidgets,
+    List<Element> newChildren, {
+    Set<Element>? forgottenChildren,
+    List<Object?>? slots,
+  }) {
     assert(slots == null || newWidgets.length == slots.length);
 
     Element? replaceWithNullIfForgotten(Element child) {
@@ -4175,8 +4265,6 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     var oldChildrenTop = 0;
     int newChildrenBottom = newWidgets.length - 1;
     int oldChildrenBottom = oldChildren.length - 1;
-
-    final newChildren = List<Element>.filled(newWidgets.length, _NullElement.instance);
 
     Element? previousChild;
 
@@ -4644,6 +4732,70 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     }());
   }
 
+  // Called when deactivating the detached child failed part-way. Hands every
+  // subtree that can still be unmounted to the inactive elements list, so it
+  // is unmounted (and its states disposed) at the end of the frame. Elements
+  // whose deactivate threw, and their ancestors, are marked failed instead:
+  // they are not disposed, but their GlobalKeys are released. Descendants
+  // already marked failed by the first deactivation error stay failed. Later
+  // deactivation errors are suppressed here, and their children are still
+  // visited for possible unmounting.
+  void _salvageAfterFailedDeactivation(Element child) {
+    // If detaching the render object failed, the subtree's render objects are
+    // still in the render tree and must not be disposed.
+    bool canUnmountAny;
+    try {
+      canUnmountAny = child.renderObject?.parent == null;
+    } catch (_) {
+      canUnmountAny = false;
+    }
+    bool salvage(Element element) {
+      if (element._lifecycleState == _ElementLifecycle.active) {
+        try {
+          element.deactivate();
+        } catch (_) {
+          element._ensureDeactivated();
+          element._lifecycleState = _ElementLifecycle.failed;
+        }
+      }
+      final attached = <(Element, bool)>[];
+      try {
+        element.visitChildren((Element descendant) {
+          if (descendant._parent == element) {
+            attached.add((descendant, salvage(descendant)));
+          }
+        });
+      } catch (_) {
+        element._lifecycleState = _ElementLifecycle.failed;
+      }
+      if (canUnmountAny &&
+          element._lifecycleState == _ElementLifecycle.inactive &&
+          attached.every(((Element, bool) entry) => entry.$2)) {
+        return true;
+      }
+      element._lifecycleState = _ElementLifecycle.failed;
+      // A failed element is never unmounted, so release its GlobalKey here:
+      // otherwise a later widget with that key would try to retake it.
+      if (element.widget.key case final GlobalKey key) {
+        owner!._unregisterGlobalKey(key, element);
+      }
+      for (final (Element descendant, bool canUnmount) in attached) {
+        if (canUnmount) {
+          descendant._parent = null;
+          try {
+            descendant.detachRenderObject();
+          } catch (_) {}
+          owner!._inactiveElements.add(descendant);
+        }
+      }
+      return false;
+    }
+
+    if (salvage(child)) {
+      owner!._inactiveElements.add(child);
+    }
+  }
+
   void _deactivateFailedChildSilently(Element child) {
     try {
       child._parent = null;
@@ -4672,7 +4824,11 @@ abstract class Element extends DiagnosticableTree implements BuildContext {
     }
     element._lifecycleState = _ElementLifecycle.failed;
     try {
-      element.visitChildren(_deactivateFailedSubtreeRecursively);
+      element.visitChildren((Element child) {
+        if (child._parent == element) {
+          _deactivateFailedSubtreeRecursively(child);
+        }
+      });
     } catch (_) {}
   }
 
@@ -5851,10 +6007,21 @@ abstract class ComponentElement extends Element {
           ],
         ),
       );
-      // _Make sure the old child subtree are deactivated and disposed.
-      try {
-        _child?.deactivate();
-      } catch (_) {}
+      // Make sure the old child subtree is deactivated and unmounted (disposing
+      // its states). If updateChild already deactivated it before failing, it
+      // is no longer our child. Children it detached from a partly updated
+      // subtree are skipped by the inactive elements list.
+      final Element? oldChild = _child;
+      _child = null;
+      if (oldChild != null && oldChild._parent == this) {
+        try {
+          deactivateChild(oldChild);
+        } catch (_) {
+          if (oldChild._lifecycleState == _ElementLifecycle.active) {
+            _salvageAfterFailedDeactivation(oldChild);
+          }
+        }
+      }
       _child = updateChild(null, built, slot);
     }
   }

@@ -2138,6 +2138,1051 @@ The findRenderObject() method was called for the following element:
       expect(element.debugIsDefunct, true);
     },
   );
+
+  testWidgets('old subtree is unmounted if updating the child of a ComponentElement throws', (
+    WidgetTester tester,
+  ) async {
+    final notifier = _ListenerCountingNotifier();
+    addTearDown(notifier.dispose);
+    var builds = 0;
+    var disposals = 0;
+    Widget buildTree({required bool throwOnUpdate}) {
+      return Directionality(
+        textDirection: TextDirection.ltr,
+        child: Builder(
+          builder: (BuildContext context) => _ThrowOnUpdateWidget(
+            throwOnUpdate: throwOnUpdate,
+            child: StatefulWidgetSpy(
+              onDispose: (_) => disposals++,
+              child: ListenableBuilder(
+                listenable: notifier,
+                builder: (BuildContext context, Widget? child) {
+                  builds++;
+                  return const SizedBox();
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildTree(throwOnUpdate: false));
+    final Element element = tester.element(find.byType(ListenableBuilder));
+    expect(notifier.listenerCount, 1);
+
+    await tester.pumpWidget(buildTree(throwOnUpdate: true));
+    expect(tester.takeException(), isStateError);
+    expect(find.byType(ErrorWidget), findsOneWidget);
+    expect(element.debugIsDefunct, true);
+    expect(disposals, 1);
+    expect(notifier.listenerCount, 0);
+
+    builds = 0;
+    notifier.notify();
+    await tester.pump();
+    expect(builds, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('old subtree is unmounted once if mounting a replacement child throws', (
+    WidgetTester tester,
+  ) async {
+    var disposals = 0;
+    await tester.pumpWidget(
+      Builder(builder: (_) => StatefulWidgetSpy(onDispose: (_) => disposals++)),
+    );
+    final Element element = tester.element(find.byType(StatefulWidgetSpy));
+
+    await tester.pumpWidget(Builder(builder: (_) => const _ThrowOnMountWidget()));
+
+    expect(tester.takeException(), isStateError);
+    expect(find.byType(ErrorWidget), findsOneWidget);
+    expect(element.debugIsDefunct, true);
+    expect(disposals, 1);
+  });
+
+  testWidgets('partly updated old subtree is torn down once if updating it throws', (
+    WidgetTester tester,
+  ) async {
+    var disposals = 0;
+    Widget buildTree(Widget middle) {
+      return Directionality(
+        textDirection: TextDirection.ltr,
+        child: Builder(
+          builder: (_) => Stack(children: <Widget>[const SizedBox(), middle, const SizedBox()]),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildTree(StatefulWidgetSpy(onDispose: (_) => disposals++)));
+    final Element element = tester.element(find.byType(StatefulWidgetSpy));
+    final Element stack = tester.element(find.byType(Stack));
+
+    await tester.pumpWidget(buildTree(const _ThrowOnMountWidget()));
+
+    expect(tester.takeException(), isStateError);
+    expect(find.byType(ErrorWidget), findsOneWidget);
+    expect(element.debugIsDefunct, true);
+    expect(disposals, 1);
+    expect(stack.debugIsActive, false);
+
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'old subtree is torn down if deactivating it throws after updating it threw',
+    experimentalLeakTesting: LeakTesting.settings
+        .withIgnoredAll(), // leaking by design because of exception
+    (WidgetTester tester) async {
+      final notifier = _ListenerCountingNotifier();
+      addTearDown(notifier.dispose);
+      var throwOnDeactivate = false;
+      var firstDeactivations = 0;
+      var builds = 0;
+      Widget buildTree({required bool throwOnUpdate}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Builder(
+            builder: (_) => _ThrowOnUpdateWidget(
+              throwOnUpdate: throwOnUpdate,
+              child: Stack(
+                children: <Widget>[
+                  StatefulWidgetSpy(onDeactivate: (_) => firstDeactivations++),
+                  StatefulWidgetSpy(
+                    onDeactivate: (_) {
+                      if (throwOnDeactivate) {
+                        throw StateError('kaboom');
+                      }
+                    },
+                    child: ListenableBuilder(
+                      listenable: notifier,
+                      builder: (BuildContext context, Widget? child) {
+                        builds++;
+                        return const SizedBox();
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(throwOnUpdate: false));
+      final Element stack = tester.element(find.byType(Stack));
+      final Element listenableBuilder = tester.element(find.byType(ListenableBuilder));
+
+      throwOnDeactivate = true;
+      await tester.pumpWidget(buildTree(throwOnUpdate: true));
+      throwOnDeactivate = false;
+
+      expect(tester.takeException(), isStateError);
+      expect(find.byType(ErrorWidget), findsOneWidget);
+      expect(firstDeactivations, 1);
+      expect(stack.debugIsActive, false);
+      expect(listenableBuilder.debugIsActive, false);
+
+      builds = 0;
+      notifier.notify();
+      await tester.pump();
+      expect(builds, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('child moved out by a GlobalKey survives when its old parent fails to update', (
+    WidgetTester tester,
+  ) async {
+    final GlobalKey key = GlobalKey();
+    var disposals = 0;
+    final Widget keyed = KeyedSubtree(
+      key: key,
+      child: StatefulWidgetSpy(onDispose: (_) => disposals++),
+    );
+    Widget buildTree({required bool moved}) {
+      return Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(
+          children: <Widget>[
+            if (moved) keyed,
+            Builder(
+              builder: (_) => _ThrowOnUpdateWidget(
+                throwOnUpdate: moved,
+                child: moved ? const SizedBox() : keyed,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildTree(moved: false));
+    final Element element = tester.element(find.byType(StatefulWidgetSpy));
+    final Element oldParent = tester.element(find.byType(_ThrowOnUpdateWidget));
+
+    await tester.pumpWidget(buildTree(moved: true));
+
+    expect(tester.takeException(), isStateError);
+    expect(oldParent.debugIsDefunct, true);
+    expect(element.debugIsActive, true);
+    expect(tester.element(find.byType(StatefulWidgetSpy)), same(element));
+    expect(disposals, 0);
+  });
+
+  group('updateChildren throwing after inflating new children', () {
+    Widget stackOf(List<Widget> middle) {
+      return Directionality(
+        textDirection: TextDirection.ltr,
+        child: Builder(
+          builder: (_) => Stack(children: <Widget>[const SizedBox(), ...middle, const SizedBox()]),
+        ),
+      );
+    }
+
+    testWidgets('unmounts the new children once and reports the original error', (
+      WidgetTester tester,
+    ) async {
+      final notifier = _ListenerCountingNotifier();
+      addTearDown(notifier.dispose);
+      var oldDisposals = 0;
+      var newDeactivations = 0;
+      var newDisposals = 0;
+      var builds = 0;
+      await tester.pumpWidget(
+        stackOf(<Widget>[StatefulWidgetSpy(onDispose: (_) => oldDisposals++)]),
+      );
+      final Element oldElement = tester.element(find.byType(StatefulWidgetSpy));
+
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      await tester.pumpWidget(
+        stackOf(<Widget>[
+          const SizedBox(width: 1),
+          StatefulWidgetSpy(
+            onDeactivate: (_) => newDeactivations++,
+            onDispose: (_) => newDisposals++,
+            child: ListenableBuilder(
+              listenable: notifier,
+              builder: (BuildContext context, Widget? child) {
+                builds++;
+                return const SizedBox();
+              },
+            ),
+          ),
+          const _ThrowOnMountWidget(),
+        ]),
+      );
+      FlutterError.onError = onError;
+
+      expect(errors, hasLength(1));
+      expect(errors.single.exception, isStateError);
+      expect(errors.single.stack.toString(), contains('_ThrowOnMountWidget.createRenderObject'));
+      expect(find.byType(ErrorWidget), findsOneWidget);
+      expect(oldElement.debugIsDefunct, true);
+      expect(oldDisposals, 1);
+      expect(newDeactivations, 1);
+      expect(newDisposals, 1);
+      expect(notifier.listenerCount, 0);
+
+      builds = 0;
+      notifier.notify();
+      await tester.pump();
+      expect(builds, 0);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('keeps a child moved out by a GlobalKey', (WidgetTester tester) async {
+      final GlobalKey key = GlobalKey();
+      var keyedDisposals = 0;
+      var newDisposals = 0;
+      final Widget keyed = KeyedSubtree(
+        key: key,
+        child: StatefulWidgetSpy(onDispose: (_) => keyedDisposals++),
+      );
+      Widget buildTree({required bool moved}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Stack(
+            children: <Widget>[
+              if (moved) keyed,
+              Builder(
+                builder: (_) => Stack(
+                  children: <Widget>[
+                    if (!moved) keyed,
+                    if (moved) StatefulWidgetSpy(onDispose: (_) => newDisposals++),
+                    if (moved) const _ThrowOnMountWidget(),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(moved: false));
+      final keyedElement = key.currentContext! as Element;
+
+      await tester.pumpWidget(buildTree(moved: true));
+
+      expect(tester.takeException(), isStateError);
+      expect(key.currentContext, same(keyedElement));
+      expect(keyedElement.debugIsActive, true);
+      expect(keyedDisposals, 0);
+      expect(newDisposals, 1);
+    });
+
+    testWidgets('unmounts a child moved in by a GlobalKey once', (WidgetTester tester) async {
+      final GlobalKey key = GlobalKey();
+      var keyedDisposals = 0;
+      final Widget keyed = KeyedSubtree(
+        key: key,
+        child: StatefulWidgetSpy(onDispose: (_) => keyedDisposals++),
+      );
+      Widget buildTree({required bool moved}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Stack(
+            children: <Widget>[
+              if (!moved) keyed,
+              Builder(
+                builder: (_) => Stack(
+                  children: <Widget>[if (moved) keyed, if (moved) const _ThrowOnMountWidget()],
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(moved: false));
+      final keyedElement = key.currentContext! as Element;
+
+      await tester.pumpWidget(buildTree(moved: true));
+
+      expect(tester.takeException(), isStateError);
+      expect(keyedElement.debugIsDefunct, true);
+      expect(key.currentContext, isNull);
+      expect(keyedDisposals, 1);
+
+      await tester.pumpWidget(buildTree(moved: false));
+      expect(key.currentContext, isNotNull);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('keeps the old children usable for a caller that retries the update', (
+      WidgetTester tester,
+    ) async {
+      var disposals = 0;
+      Widget buildTree(List<Widget> children) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: _SurvivingStack(children: children),
+        );
+      }
+
+      final Widget kept = StatefulWidgetSpy(
+        key: const ValueKey<String>('kept'),
+        onDispose: (_) => disposals++,
+      );
+      await tester.pumpWidget(buildTree(<Widget>[kept]));
+      final Element keptElement = tester.element(find.byType(StatefulWidgetSpy));
+
+      await tester.pumpWidget(buildTree(<Widget>[kept, const _ThrowOnMountWidget()]));
+      await tester.pumpWidget(buildTree(<Widget>[kept, const SizedBox()]));
+
+      expect(tester.takeException(), isNull);
+      expect(tester.element(find.byType(StatefulWidgetSpy)), same(keptElement));
+      expect(keptElement.debugIsActive, true);
+      expect(disposals, 0);
+    });
+
+    testWidgets('stops a new child from building if deactivating it throws', (
+      WidgetTester tester,
+    ) async {
+      final notifier = _ListenerCountingNotifier();
+      addTearDown(notifier.dispose);
+      var builds = 0;
+      late Element built;
+      await tester.pumpWidget(stackOf(const <Widget>[]));
+
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      await tester.pumpWidget(
+        stackOf(<Widget>[
+          StatefulWidgetSpy(
+            onDeactivate: (_) => throw ArgumentError('deactivate'),
+            child: ListenableBuilder(
+              listenable: notifier,
+              builder: (BuildContext context, Widget? child) {
+                builds++;
+                built = context as Element;
+                return const SizedBox();
+              },
+            ),
+          ),
+          const _ThrowOnMountWidget(),
+        ]),
+      );
+      FlutterError.onError = onError;
+
+      expect(errors, hasLength(1));
+      expect(errors.single.exception, isStateError);
+      expect(built.debugIsActive, false);
+
+      builds = 0;
+      notifier.notify();
+      await tester.pump();
+      expect(builds, 0);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('a dispose that throws while finalizing the tree', () {
+    testWidgets('does not stop the other inactive elements from being unmounted', (
+      WidgetTester tester,
+    ) async {
+      final GlobalKey key = GlobalKey();
+      var throwOnDispose = true;
+      final disposals = <String, int>{};
+      void disposed(String name) => disposals[name] = (disposals[name] ?? 0) + 1;
+      Widget buildTree({required bool removed}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(
+            children: <Widget>[
+              if (!removed)
+                StatefulWidgetSpy(
+                  onDispose: (_) => disposed('parent'),
+                  child: Stack(
+                    children: <Widget>[
+                      StatefulWidgetSpy(
+                        onDispose: (_) {
+                          disposed('throwing');
+                          if (throwOnDispose) {
+                            throw StateError('dispose failed');
+                          }
+                        },
+                      ),
+                      StatefulWidgetSpy(onDispose: (_) => disposed('sibling')),
+                    ],
+                  ),
+                ),
+              if (!removed)
+                KeyedSubtree(
+                  key: key,
+                  child: StatefulWidgetSpy(onDispose: (_) => disposed('keyed')),
+                ),
+            ],
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(removed: false));
+      final List<Element> spies = tester.elementList(find.byType(StatefulWidgetSpy)).toList();
+
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      await tester.pumpWidget(buildTree(removed: true));
+      FlutterError.onError = onError;
+      throwOnDispose = false;
+
+      expect(errors, hasLength(1));
+      expect((errors.single.exception as StateError).message, 'dispose failed');
+      expect(errors.single.stack.toString(), contains('_StatefulWidgetSpyState.dispose'));
+      expect(disposals, <String, int>{'throwing': 1, 'sibling': 1, 'parent': 1, 'keyed': 1});
+      expect(spies.every((Element spy) => spy.debugIsDefunct), true);
+      expect(key.currentContext, isNull);
+
+      await tester.pumpWidget(buildTree(removed: false));
+      expect(tester.takeException(), isNull);
+      expect(key.currentContext, isNotNull);
+    });
+
+    testWidgets('reports every failed dispose once, after the tree is unlocked', (
+      WidgetTester tester,
+    ) async {
+      var disposals = 0;
+      late StateSetter setProbeState;
+      Widget throwing(String message) => StatefulWidgetSpy(
+        onDispose: (_) {
+          disposals++;
+          throw StateError(message);
+        },
+      );
+      Widget buildTree({required bool removed}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(
+            children: <Widget>[
+              StatefulBuilder(
+                builder: (BuildContext context, StateSetter setState) {
+                  setProbeState = setState;
+                  return const SizedBox();
+                },
+              ),
+              if (!removed) throwing('first'),
+              if (!removed) throwing('second'),
+            ],
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(removed: false));
+
+      final disposeErrors = <String>[];
+      final lockedErrors = <Object>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = (FlutterErrorDetails details) {
+        if (details.exception case final StateError error) {
+          disposeErrors.add(error.message);
+          try {
+            setProbeState(() {});
+          } on FlutterError catch (error) {
+            if (error.toString().contains('when widget tree was locked')) {
+              lockedErrors.add(error);
+            }
+          }
+        }
+      };
+      await tester.pumpWidget(buildTree(removed: true));
+      FlutterError.onError = onError;
+
+      expect(disposals, 2);
+      expect(disposeErrors, unorderedEquals(<String>['first', 'second']));
+      expect(lockedErrors, isEmpty);
+    });
+  });
+
+  group('cleanup of a subtree whose update failed', () {
+    testWidgets('disposes the children still attached to a partly updated subtree', (
+      WidgetTester tester,
+    ) async {
+      final notifier = _ListenerCountingNotifier();
+      addTearDown(notifier.dispose);
+      var removedDisposals = 0;
+      var keptDeactivations = 0;
+      var keptDisposals = 0;
+      Widget buildTree(Widget first) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Builder(
+            builder: (_) => Stack(
+              children: <Widget>[
+                first,
+                StatefulWidgetSpy(
+                  key: const ValueKey<String>('kept'),
+                  onDeactivate: (_) => keptDeactivations++,
+                  onDispose: (_) => keptDisposals++,
+                  child: ListenableBuilder(
+                    listenable: notifier,
+                    builder: (BuildContext context, Widget? child) => const SizedBox(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(StatefulWidgetSpy(onDispose: (_) => removedDisposals++)));
+      final Element stack = tester.element(find.byType(Stack));
+
+      await tester.pumpWidget(buildTree(const _ThrowOnMountWidget()));
+
+      expect(tester.takeException(), isStateError);
+      expect(removedDisposals, 1);
+      expect(keptDeactivations, 1);
+      expect(keptDisposals, 1);
+      expect(notifier.listenerCount, 0);
+      expect(stack.debugIsDefunct, true);
+    });
+
+    testWidgets('deactivates a removed child once if its old parent then fails to deactivate', (
+      WidgetTester tester,
+    ) async {
+      var removedDeactivations = 0;
+      var removedDisposals = 0;
+      Widget buildTree(Widget first) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Builder(
+            builder: (_) => _ThrowOnDeactivateStack(
+              children: <Widget>[
+                first,
+                const SizedBox(key: ValueKey<String>('kept')),
+              ],
+            ),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(
+        buildTree(
+          StatefulWidgetSpy(
+            onDeactivate: (_) => removedDeactivations++,
+            onDispose: (_) => removedDisposals++,
+          ),
+        ),
+      );
+      final Element removed = tester.element(find.byType(StatefulWidgetSpy));
+
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      await tester.pumpWidget(buildTree(const _ThrowOnMountWidget()));
+      FlutterError.onError = onError;
+
+      expect(errors, hasLength(1));
+      expect(errors.single.exception, isStateError);
+      expect(removedDeactivations, 1);
+      expect(removedDisposals, 1);
+      expect(removed.debugIsDefunct, true);
+    });
+
+    testWidgets('disposes the healthy elements if deactivating one of them throws', (
+      WidgetTester tester,
+    ) async {
+      var throwOnDeactivate = false;
+      final deactivations = <String, int>{};
+      final disposals = <String, int>{};
+      void count(Map<String, int> counts, String name) => counts[name] = (counts[name] ?? 0) + 1;
+      Widget spy(String name, {Widget child = const SizedBox()}) => StatefulWidgetSpy(
+        onDeactivate: (_) {
+          count(deactivations, name);
+          if (throwOnDeactivate && name == 'throwing') {
+            throw StateError('deactivate failed');
+          }
+        },
+        onDispose: (_) => count(disposals, name),
+        child: child,
+      );
+      Widget buildTree({required bool throwOnUpdate}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Builder(
+            builder: (_) => _ThrowOnUpdateWidget(
+              throwOnUpdate: throwOnUpdate,
+              child: Stack(
+                children: <Widget>[
+                  spy('before'),
+                  spy('throwing', child: spy('throwing child')),
+                  spy('after'),
+                ],
+              ),
+            ),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(throwOnUpdate: false));
+      final Element throwing = tester.element(
+        find.byWidgetPredicate(
+          (Widget widget) => widget is StatefulWidgetSpy && widget.child is StatefulWidgetSpy,
+        ),
+      );
+
+      throwOnDeactivate = true;
+      await tester.pumpWidget(buildTree(throwOnUpdate: true));
+      throwOnDeactivate = false;
+
+      expect(tester.takeException(), isStateError);
+      expect(deactivations['before'], 1);
+      expect(deactivations['after'], 1);
+      expect(disposals['before'], 1);
+      expect(disposals['after'], 1);
+      expect(disposals['throwing'], isNull);
+      expect(throwing.debugIsActive, false);
+      expect(throwing.debugIsDefunct, false);
+    });
+
+    testWidgets('does not dispose a subtree whose render object could not be detached', (
+      WidgetTester tester,
+    ) async {
+      var disposals = 0;
+      var builds = 0;
+      final notifier = _ListenerCountingNotifier();
+      addTearDown(notifier.dispose);
+      Widget buildTree({required bool failing}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: _ThrowOnRemoveChildWidget(
+            throwOnRemove: failing,
+            child: Builder(
+              builder: (_) => _ThrowOnUpdateWidget(
+                throwOnUpdate: failing,
+                child: StatefulWidgetSpy(
+                  onDispose: (_) => disposals++,
+                  child: ListenableBuilder(
+                    listenable: notifier,
+                    builder: (BuildContext context, Widget? child) {
+                      builds++;
+                      return const SizedBox();
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(failing: false));
+      final Element spy = tester.element(find.byType(StatefulWidgetSpy));
+
+      await tester.pumpWidget(buildTree(failing: true));
+
+      expect(tester.takeException(), isStateError);
+      expect(disposals, 0);
+      expect(spy.debugIsActive, false);
+      expect(spy.debugIsDefunct, false);
+
+      builds = 0;
+      notifier.notify();
+      await tester.pump();
+      expect(builds, 0);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('disposes a subtree that was detached before detaching threw', (
+      WidgetTester tester,
+    ) async {
+      var disposals = 0;
+      Widget buildTree({required bool failing}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: _ThrowOnRemoveChildWidget(
+            throwOnRemove: failing,
+            throwAfterRemoving: true,
+            child: Builder(
+              builder: (_) => _ThrowOnUpdateWidget(
+                throwOnUpdate: failing,
+                child: StatefulWidgetSpy(onDispose: (_) => disposals++),
+              ),
+            ),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(failing: false));
+      final Element spy = tester.element(find.byType(StatefulWidgetSpy));
+
+      await tester.pumpWidget(buildTree(failing: true));
+
+      expect(tester.takeException(), isStateError);
+      expect(disposals, 1);
+      expect(spy.debugIsDefunct, true);
+    });
+
+    testWidgets('releases the GlobalKeys of the elements left failed', (WidgetTester tester) async {
+      final GlobalKey key = GlobalKey();
+      var throwOnDeactivate = false;
+      var builds = 0;
+      Widget buildTree({required bool failing}) {
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Builder(
+            builder: (_) => _ThrowOnUpdateWidget(
+              throwOnUpdate: failing,
+              child: KeyedSubtree(
+                key: key,
+                child: StatefulWidgetSpy(
+                  onBuild: (_) => builds++,
+                  onDeactivate: (_) {
+                    if (throwOnDeactivate) {
+                      throw StateError('deactivate failed');
+                    }
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(buildTree(failing: false));
+      final failed = key.currentContext! as Element;
+      throwOnDeactivate = true;
+      await tester.pumpWidget(buildTree(failing: true));
+      throwOnDeactivate = false;
+      expect(tester.takeException(), isStateError);
+      expect(key.currentContext, isNull);
+
+      builds = 0;
+      await tester.pumpWidget(buildTree(failing: false));
+
+      expect(tester.takeException(), isNull);
+      expect(key.currentContext, isNot(same(failed)));
+      expect((key.currentContext! as Element).debugIsActive, true);
+      expect(builds, 1);
+    });
+  });
+
+  for (final newChild in <bool>[false, true]) {
+    testWidgets('salvages a debug deactivation failure once (new child: $newChild)', (
+      WidgetTester tester,
+    ) async {
+      final GlobalKey rootKey = GlobalKey();
+      var rootDisposals = 0;
+      var childDeactivations = 0;
+      var childDisposals = 0;
+      Widget tree(bool fail) {
+        final Widget child = _ThrowOnDebugDeactivated(
+          child: StatefulWidgetSpy(
+            onDeactivate: (_) => childDeactivations++,
+            onDispose: (_) => childDisposals++,
+          ),
+        );
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: StatefulWidgetSpy(
+            key: rootKey,
+            onDispose: (_) => rootDisposals++,
+            child: newChild
+                ? Stack(
+                    children: <Widget>[
+                      const SizedBox(key: ValueKey<String>('first')),
+                      if (fail) child,
+                      if (fail) const _ThrowOnMountWidget(),
+                      const SizedBox(key: ValueKey<String>('last')),
+                    ],
+                  )
+                : _ThrowOnUpdateWidget(throwOnUpdate: fail, child: child),
+          ),
+        );
+      }
+
+      await tester.pumpWidget(tree(false));
+      final root = rootKey.currentContext! as Element;
+      final errors = <FlutterErrorDetails>[];
+      final FlutterExceptionHandler? onError = FlutterError.onError;
+      FlutterError.onError = errors.add;
+      try {
+        await tester.pumpWidget(tree(true));
+      } finally {
+        FlutterError.onError = onError;
+      }
+
+      expect(errors, hasLength(1));
+      expect(errors.single.exception, isA<StateError>());
+      expect(errors.single.exception.toString(), contains('kaboom'));
+      expect(rootKey.currentContext, same(root));
+      expect(root.debugIsActive, true);
+      expect(rootDisposals, 0);
+      expect(
+        find.descendant(of: find.byKey(rootKey), matching: find.byType(ErrorWidget)),
+        findsOneWidget,
+      );
+      expect(childDeactivations, 1);
+      expect(childDisposals, 1);
+      await tester.pumpWidget(const SizedBox());
+      expect(rootDisposals, 1);
+      expect(childDisposals, 1);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('removing a subtree whose deactivate throws still unmounts its healthy part', (
+    WidgetTester tester,
+  ) async {
+    final notifier = _ListenerCountingNotifier();
+    addTearDown(notifier.dispose);
+    var throwOnDeactivate = false;
+    final builds = <String, int>{};
+    final disposals = <String, int>{};
+    void count(Map<String, int> counts, String name) => counts[name] = (counts[name] ?? 0) + 1;
+    Widget spy(String name) => StatefulWidgetSpy(
+      onDeactivate: (_) {
+        if (throwOnDeactivate && name == 'throwing') {
+          throw StateError('deactivate failed');
+        }
+      },
+      onDispose: (_) => count(disposals, name),
+      child: ListenableBuilder(
+        listenable: notifier,
+        builder: (BuildContext context, Widget? child) {
+          count(builds, name);
+          return const SizedBox();
+        },
+      ),
+    );
+    Widget buildTree({required bool removed}) {
+      return Directionality(
+        textDirection: TextDirection.ltr,
+        child: Column(
+          children: <Widget>[
+            if (!removed) Stack(children: <Widget>[spy('before'), spy('throwing'), spy('after')]),
+            spy('stays'),
+          ],
+        ),
+      );
+    }
+
+    await tester.pumpWidget(buildTree(removed: false));
+    throwOnDeactivate = true;
+    final errors = <FlutterErrorDetails>[];
+    final FlutterExceptionHandler? onError = FlutterError.onError;
+    FlutterError.onError = errors.add;
+    await tester.pumpWidget(buildTree(removed: true));
+    FlutterError.onError = onError;
+    throwOnDeactivate = false;
+
+    expect(
+      errors.map((FlutterErrorDetails details) => details.exception),
+      contains(isA<StateError>()),
+    );
+    expect(find.byType(ErrorWidget), findsOneWidget);
+    expect(disposals, <String, int>{'before': 1, 'after': 1, 'stays': 1});
+
+    builds.clear();
+    notifier.notify();
+    await tester.pump();
+    expect(builds, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+}
+
+class _ThrowOnDebugDeactivated extends StatelessWidget {
+  const _ThrowOnDebugDeactivated({required this.child});
+
+  final Widget child;
+
+  @override
+  StatelessElement createElement() => _ThrowOnDebugDeactivatedElement(this);
+
+  @override
+  Widget build(BuildContext context) => child;
+}
+
+class _ThrowOnDebugDeactivatedElement extends StatelessElement {
+  _ThrowOnDebugDeactivatedElement(_ThrowOnDebugDeactivated super.widget);
+
+  @override
+  void debugDeactivated() {
+    super.debugDeactivated();
+    throw StateError('debug deactivation failed');
+  }
+}
+
+class _ThrowOnRemoveChildWidget extends SingleChildRenderObjectWidget {
+  const _ThrowOnRemoveChildWidget({
+    required this.throwOnRemove,
+    this.throwAfterRemoving = false,
+    super.child,
+  });
+
+  final bool throwOnRemove;
+  final bool throwAfterRemoving;
+
+  @override
+  SingleChildRenderObjectElement createElement() => _ThrowOnRemoveChildElement(this);
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => RenderProxyBox();
+}
+
+class _ThrowOnRemoveChildElement extends SingleChildRenderObjectElement {
+  _ThrowOnRemoveChildElement(_ThrowOnRemoveChildWidget super.widget);
+
+  @override
+  void removeRenderObjectChild(RenderObject child, Object? slot) {
+    final widget = this.widget as _ThrowOnRemoveChildWidget;
+    if (widget.throwOnRemove && !widget.throwAfterRemoving) {
+      throw StateError('remove failed');
+    }
+    super.removeRenderObjectChild(child, slot);
+    if (widget.throwOnRemove) {
+      throw StateError('remove failed');
+    }
+  }
+}
+
+// A Stack whose element survives a failing update and retries it with its old
+// children on the next update, like an element that calls updateChildren from
+// a performRebuild without catching.
+class _SurvivingStack extends Stack {
+  const _SurvivingStack({super.children});
+
+  @override
+  MultiChildRenderObjectElement createElement() => _SurvivingStackElement(this);
+}
+
+class _SurvivingStackElement extends MultiChildRenderObjectElement {
+  _SurvivingStackElement(_SurvivingStack super.widget);
+
+  @override
+  void update(MultiChildRenderObjectWidget newWidget) {
+    try {
+      super.update(newWidget);
+    } on StateError {
+      // Leave the old children in place.
+    }
+  }
+}
+
+class _ThrowOnDeactivateStack extends Stack {
+  const _ThrowOnDeactivateStack({super.children});
+
+  @override
+  MultiChildRenderObjectElement createElement() => _ThrowOnDeactivateStackElement(this);
+}
+
+class _ThrowOnDeactivateStackElement extends MultiChildRenderObjectElement {
+  _ThrowOnDeactivateStackElement(_ThrowOnDeactivateStack super.widget);
+
+  @override
+  void deactivate() {
+    super.deactivate();
+    throw StateError('deactivate failed');
+  }
+}
+
+class _ThrowOnMountWidget extends LeafRenderObjectWidget {
+  const _ThrowOnMountWidget();
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    throw StateError('kaboom');
+  }
+}
+
+class _ListenerCountingNotifier extends ChangeNotifier {
+  int listenerCount = 0;
+
+  @override
+  void addListener(VoidCallback listener) {
+    listenerCount++;
+    super.addListener(listener);
+  }
+
+  @override
+  void removeListener(VoidCallback listener) {
+    listenerCount--;
+    super.removeListener(listener);
+  }
+
+  void notify() => notifyListeners();
+}
+
+class _ThrowOnUpdateWidget extends SingleChildRenderObjectWidget {
+  const _ThrowOnUpdateWidget({required this.throwOnUpdate, super.child});
+
+  final bool throwOnUpdate;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => RenderProxyBox();
+
+  @override
+  void updateRenderObject(BuildContext context, RenderProxyBox renderObject) {
+    if (throwOnUpdate) {
+      throw StateError('kaboom');
+    }
+  }
 }
 
 class _TestInheritedElement extends InheritedElement {
